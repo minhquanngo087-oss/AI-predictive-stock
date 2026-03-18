@@ -34,6 +34,29 @@ def serve_index():
     return send_from_directory(BASE_DIR, 'index.html')
 
 
+# ── Simple API Response Cache ──
+_api_cache = {}  # key -> (data, expire_time)
+
+def cache_get(key):
+    """Get cached response if not expired."""
+    if key in _api_cache:
+        data, expire = _api_cache[key]
+        if time.time() < expire:
+            return data
+        del _api_cache[key]
+    return None
+
+def cache_set(key, data, ttl=120):
+    """Cache response for ttl seconds (default 2 min)."""
+    _api_cache[key] = (data, time.time() + ttl)
+    # Clean old entries (keep cache small)
+    if len(_api_cache) > 200:
+        now = time.time()
+        expired = [k for k, (_, exp) in _api_cache.items() if now >= exp]
+        for k in expired:
+            del _api_cache[k]
+
+
 # ── Config ──
 SSI_DATA_BASE = 'https://fc-data.ssi.com.vn/api/v2/Market'
 ALLORIGINS = 'https://api.allorigins.win/raw?url='
@@ -87,7 +110,15 @@ def get_ssi_chart(ticker):
     Priority: SSI API → Yahoo Finance .VN
     """
     ticker = ticker.upper()
-    # Map range param → days for SSI + Yahoo range string
+    range_param = request.args.get('range', '6mo').lower()
+    interval_param = request.args.get('interval', '1d').lower()
+
+    # Check cache first (faster response)
+    cache_key = f"chart:{ticker}:{range_param}:{interval_param}"
+    cached = cache_get(cache_key)
+    if cached:
+        print(f"⚡ Cache hit: {cache_key}")
+        return jsonify(cached)
     RANGE_MAP = {
         '1d':   (1,    '1d'),
         '2d':   (2,    '2d'),
@@ -99,13 +130,11 @@ def get_ssi_chart(ticker):
         '2y':   (740, '2y'),
         '5y':   (1830,'5y'),
     }
-    range_param = request.args.get('range', '6mo').lower()
     if range_param not in RANGE_MAP:
         range_param = '6mo'
     days, yf_range = RANGE_MAP[range_param]
 
     # ── Intraday intervals: bypass SSI, go straight to Yahoo Finance ──
-    interval_param = request.args.get('interval', '1d').lower()
     INTRADAY_INTERVALS = ['1m', '5m', '15m', '30m', '60m', '1h']
     if interval_param in INTRADAY_INTERVALS:
         # Use the range from frontend (e.g. '1d' for today only)
@@ -139,7 +168,9 @@ def get_ssi_chart(ticker):
                     continue
             if candles:
                 print(f"✅ Yahoo Intraday {yf_intra_interval}/{yf_intra_range}: {len(candles)} bars for {ticker}")
-                return jsonify({'ticker': ticker, 'source': f'Yahoo-{yf_intra_interval}', 'candles': candles, 'intraday': True})
+                result_data = {'ticker': ticker, 'source': f'Yahoo-{yf_intra_interval}', 'candles': candles, 'intraday': True}
+                cache_set(cache_key, result_data, ttl=120)  # Cache 2 min
+                return jsonify(result_data)
         except Exception as e:
             print(f"Intraday fetch failed: {e}")
         return jsonify({'error': f'No intraday data for {ticker}', 'candles': []}), 404
