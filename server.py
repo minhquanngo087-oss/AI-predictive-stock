@@ -62,19 +62,56 @@ SSI_DATA_BASE = 'https://fc-data.ssi.com.vn/api/v2/Market'
 ALLORIGINS = 'https://api.allorigins.win/raw?url='
 
 YAHOO_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'en-US,en;q=0.5',
 }
 
 def yahoo_get(path):
-    """Make a Yahoo Finance request. Googlebot UA bypasses anti-scraping reliably."""
+    """Make a Yahoo Finance request."""
     s = requests.Session()
     return s.get(
         f'https://query1.finance.yahoo.com{path}',
         headers=YAHOO_HEADERS,
-        timeout=12
+        timeout=15
     )
+
+
+# ── yfinance fallback (works from cloud servers) ──
+try:
+    import yfinance as yf
+    HAS_YFINANCE = True
+    print("✅ yfinance available as fallback")
+except ImportError:
+    HAS_YFINANCE = False
+    print("⚠ yfinance not installed, using direct API only")
+
+
+def yf_chart_fallback(ticker_vn, yf_range, interval):
+    """Fallback: use yfinance library to fetch chart data."""
+    if not HAS_YFINANCE:
+        return None
+    try:
+        t = yf.Ticker(ticker_vn)
+        df = t.history(period=yf_range, interval=interval)
+        if df.empty:
+            return None
+        candles = []
+        is_intraday = interval in ['1m', '5m', '15m', '30m', '60m', '1h']
+        for idx, row in df.iterrows():
+            ts = int(idx.timestamp())
+            candles.append({
+                'time': ts if is_intraday else idx.strftime('%Y-%m-%d'),
+                'open':   round(float(row['Open']), 2),
+                'high':   round(float(row['High']), 2),
+                'low':    round(float(row['Low']), 2),
+                'close':  round(float(row['Close']), 2),
+                'volume': int(row.get('Volume', 0)),
+            })
+        return candles
+    except Exception as e:
+        print(f"  yfinance fallback error: {e}")
+        return None
 
 
 SSI_HEADERS = {
@@ -173,6 +210,16 @@ def get_ssi_chart(ticker):
                 return jsonify(result_data)
         except Exception as e:
             print(f"Intraday fetch failed: {e}")
+
+        # ── yfinance fallback for intraday ──
+        print(f"  ↻ Trying yfinance fallback for {ticker} intraday...")
+        yf_candles = yf_chart_fallback(f"{ticker}.VN", yf_intra_range, interval_param)
+        if yf_candles:
+            print(f"✅ yfinance Intraday: {len(yf_candles)} bars for {ticker}")
+            result_data = {'ticker': ticker, 'source': f'yfinance-{interval_param}', 'candles': yf_candles, 'intraday': True}
+            cache_set(cache_key, result_data, ttl=120)
+            return jsonify(result_data)
+
         return jsonify({'error': f'No intraday data for {ticker}', 'candles': []}), 404
 
     # ── Strategy 1: SSI DailyOhlc API ──
@@ -256,6 +303,15 @@ def get_ssi_chart(ticker):
             print(f"Yahoo fallback ({range_str}) failed: {e}")
             continue
     
+    # ── Final fallback: yfinance library ──
+    print(f"  ↻ Trying yfinance fallback for {ticker} daily {yf_range}...")
+    yf_candles = yf_chart_fallback(f"{ticker}.VN", yf_range, '1d')
+    if yf_candles:
+        print(f"✅ yfinance Daily: {len(yf_candles)} candles for {ticker}")
+        result_data = {'ticker': ticker, 'source': 'yfinance-daily', 'candles': yf_candles}
+        cache_set(cache_key, result_data, ttl=300)  # Cache 5 min for daily
+        return jsonify(result_data)
+
     return jsonify({'error': f'No data found for {ticker}', 'candles': []}), 404
 
 
