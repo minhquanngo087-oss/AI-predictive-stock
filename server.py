@@ -81,16 +81,34 @@ def _init_yahoo_session():
     try:
         _yf_session = requests.Session()
         _yf_session.headers.update(YAHOO_HEADERS)
-        # Step 1: Get cookies from Yahoo Finance
-        resp = _yf_session.get('https://fc.yahoo.com', timeout=10, allow_redirects=True)
-        # Step 2: Get crumb
-        crumb_resp = _yf_session.get('https://query2.finance.yahoo.com/v1/test/getcrumb', timeout=10)
+        
+        # Step 1: Visit Yahoo page to get initial cookies
+        try:
+            _yf_session.get('https://fc.yahoo.com', timeout=10, allow_redirects=True)
+        except Exception:
+            pass  # This may fail but still sets cookies
+        
+        # Step 2: Set GDPR consent cookie (required from cloud/EU IPs)
+        _yf_session.cookies.set('A1', 'v=1', domain='.yahoo.com')
+        _yf_session.cookies.set('A3', 'v=1', domain='.yahoo.com')
+        _yf_session.cookies.set('GUC', 'consent=YES', domain='.yahoo.com')
+        
+        # Step 3: Get crumb token
+        crumb_resp = _yf_session.get(
+            'https://query2.finance.yahoo.com/v1/test/getcrumb',
+            timeout=10
+        )
         if crumb_resp.status_code == 200 and crumb_resp.text:
             _yf_crumb = crumb_resp.text.strip()
             _yf_session_time = time.time()
             print(f"✅ Yahoo session initialized (crumb: {_yf_crumb[:8]}...)")
             return True
-        print(f"⚠ Failed to get crumb: status={crumb_resp.status_code}")
+        
+        # Fallback: try without crumb (some endpoints work)
+        print(f"⚠ No crumb (status={crumb_resp.status_code}), trying without...")
+        _yf_crumb = None
+        _yf_session_time = time.time()
+        return True
     except Exception as e:
         print(f"⚠ Yahoo session init failed: {e}")
     _yf_session = None
@@ -100,9 +118,11 @@ def _init_yahoo_session():
 def yahoo_get(path):
     """Make an authenticated Yahoo Finance request with cookie/crumb."""
     if _init_yahoo_session() and _yf_session:
-        # Add crumb to URL
-        separator = '&' if '?' in path else '?'
-        url = f'https://query2.finance.yahoo.com{path}{separator}crumb={_yf_crumb}'
+        if _yf_crumb:
+            separator = '&' if '?' in path else '?'
+            url = f'https://query2.finance.yahoo.com{path}{separator}crumb={_yf_crumb}'
+        else:
+            url = f'https://query1.finance.yahoo.com{path}'
         return _yf_session.get(url, timeout=15)
     # Fallback to simple request
     s = requests.Session()
