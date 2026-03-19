@@ -67,8 +67,44 @@ YAHOO_HEADERS = {
     'Accept-Language': 'en-US,en;q=0.5',
 }
 
+# ── Yahoo Finance with cookie/crumb auth (works from cloud servers) ──
+_yf_session = None
+_yf_crumb = None
+_yf_session_time = 0
+
+def _init_yahoo_session():
+    """Initialize Yahoo Finance session with cookies and crumb token."""
+    global _yf_session, _yf_crumb, _yf_session_time
+    # Reuse session for 30 minutes
+    if _yf_session and (time.time() - _yf_session_time) < 1800 and _yf_crumb:
+        return True
+    try:
+        _yf_session = requests.Session()
+        _yf_session.headers.update(YAHOO_HEADERS)
+        # Step 1: Get cookies from Yahoo Finance
+        resp = _yf_session.get('https://fc.yahoo.com', timeout=10, allow_redirects=True)
+        # Step 2: Get crumb
+        crumb_resp = _yf_session.get('https://query2.finance.yahoo.com/v1/test/getcrumb', timeout=10)
+        if crumb_resp.status_code == 200 and crumb_resp.text:
+            _yf_crumb = crumb_resp.text.strip()
+            _yf_session_time = time.time()
+            print(f"✅ Yahoo session initialized (crumb: {_yf_crumb[:8]}...)")
+            return True
+        print(f"⚠ Failed to get crumb: status={crumb_resp.status_code}")
+    except Exception as e:
+        print(f"⚠ Yahoo session init failed: {e}")
+    _yf_session = None
+    _yf_crumb = None
+    return False
+
 def yahoo_get(path):
-    """Make a Yahoo Finance request."""
+    """Make an authenticated Yahoo Finance request with cookie/crumb."""
+    if _init_yahoo_session() and _yf_session:
+        # Add crumb to URL
+        separator = '&' if '?' in path else '?'
+        url = f'https://query2.finance.yahoo.com{path}{separator}crumb={_yf_crumb}'
+        return _yf_session.get(url, timeout=15)
+    # Fallback to simple request
     s = requests.Session()
     return s.get(
         f'https://query1.finance.yahoo.com{path}',
